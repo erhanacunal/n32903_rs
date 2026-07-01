@@ -1,0 +1,9 @@
+[build]
+target = "arm926ej-s.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins"]
+
+# Note: linker flags (-Tlinker.ld, -nostartfiles) are set by the final
+# application crate, not this staticlib.  See linker.ld and asm/startup.s
+# for the infrastructure to copy into your application.
