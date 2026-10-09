@@ -88,16 +88,41 @@ pub unsafe fn sdram_size_mb() -> i32 {
 // ============================================================================
 
 /// Clean and invalidate the entire D-cache.
-/// Loops on CP15 test-clean-and-invalidate until complete.
+/// Loops on CP15 test-clean-and-invalidate until complete.  The result
+/// comes back in the Z flag, so the MRC must target APSR_nzcv.
 #[inline(always)]
 pub unsafe fn dcache_clean_invalidate() {
     core::arch::asm!(
         "1:",
-        "MRC p15, 0, {tmp}, c7, c14, 3",
-        "CMP {tmp}, #0",
+        "MRC p15, 0, APSR_nzcv, c7, c14, 3",
         "BNE 1b",
+        options(nostack),
+    );
+}
+
+/// Write all dirty D-cache lines back to memory (lines stay valid), then
+/// drain the write buffer.  Cost depends on the number of dirty lines, not
+/// on the size of the data, so it is cheap after drawing a frame.
+#[inline(always)]
+pub unsafe fn dcache_clean() {
+    core::arch::asm!(
+        "1:",
+        "MRC p15, 0, APSR_nzcv, c7, c10, 3",
+        "BNE 1b",
+        "MOV {tmp}, #0",
+        "MCR p15, 0, {tmp}, c7, c10, 4",
         tmp = out(reg) _,
-        options(nomem, nostack),
+        options(nostack),
+    );
+}
+
+/// Wait until all buffered writes have reached memory.
+#[inline(always)]
+pub unsafe fn drain_write_buffer() {
+    core::arch::asm!(
+        "MCR p15, 0, {tmp}, c7, c10, 4",
+        tmp = in(reg) 0u32,
+        options(nostack),
     );
 }
 

@@ -9,6 +9,10 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 
+[features]
+# Global heap allocator for the `alloc` crate (needs "alloc" in build-std)
+heap = []
+
 [profile.dev]
 panic = "abort"
 opt-level = "s"

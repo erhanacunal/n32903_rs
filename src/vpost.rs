@@ -251,9 +251,12 @@ pub unsafe fn vpost_clock_disable() {
 }
 
 /// Reset the VPOST engine.
+///
+/// VPOST is reset through AHBIPRST bit 10 (BSP and Nextion firmware).
+/// Bit 10 of APBIPRST is the PWM reset — using that would stop the PWM.
 pub unsafe fn vpost_reset() {
-    reg_write32(REG_APBIPRST, reg_read32(REG_APBIPRST) | VPOSTRST);
-    reg_write32(REG_APBIPRST, reg_read32(REG_APBIPRST) & !VPOSTRST);
+    reg_write32(REG_AHBIPRST, reg_read32(REG_AHBIPRST) | VPOSTRST);
+    reg_write32(REG_AHBIPRST, reg_read32(REG_AHBIPRST) & !VPOSTRST);
 }
 
 // ============================================================================
@@ -371,19 +374,22 @@ pub unsafe fn vpost_set_display_window(win: &DisplayWindow) {
 }
 
 /// Configure signal polarities (VSYNC, HSYNC, VDEN, pixel clock).
+///
+/// A set TCON4 bit means active high / falling edge
+/// (`vpostSetSyncLCM_SignalPolarity` in the BSP).
 pub unsafe fn vpost_set_signal_polarity(pol: &SignalPolarity) {
     let mut val = reg_read32(REG_LCM_TCON4);
     val &= !(TCON4_VSP | TCON4_HSP | TCON4_DEP | TCON4_PCLKP);
-    if pol.vsync_active_low {
+    if !pol.vsync_active_low {
         val |= TCON4_VSP;
     }
-    if pol.hsync_active_low {
+    if !pol.hsync_active_low {
         val |= TCON4_HSP;
     }
-    if pol.vden_active_low {
+    if !pol.vden_active_low {
         val |= TCON4_DEP;
     }
-    if pol.dclk_rising_edge {
+    if !pol.dclk_rising_edge {
         val |= TCON4_PCLKP;
     }
     reg_write32(REG_LCM_TCON4, val);

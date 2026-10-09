@@ -54,11 +54,15 @@
 #![allow(static_mut_refs, non_upper_case_globals)]
 
 pub mod aic;
+pub mod backlight;
 pub mod cache;
 pub mod clock;
 pub mod ebi;
 pub mod gpio;
+#[cfg(feature = "heap")]
+pub mod heap;
 pub mod i2c;
+pub mod lcd;
 pub mod mmu;
 pub mod power;
 pub mod pwm;

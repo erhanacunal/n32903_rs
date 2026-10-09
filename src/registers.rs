@@ -597,10 +597,10 @@ pub const REG_LCM_TCON4: u32 = VPOST_BA + 0x1C;
     pub const TCON4_MVPW: u32 = 0x0000_FF00;
     pub const TCON4_MPU_FMARKP: u32 = 0x0000_0020;
     pub const TCON4_MPU_VSYNCP: u32 = 0x0000_0010;
-    pub const TCON4_VSP: u32 = 0x0000_0008;  // VSYNC polarity (1=active low)
-    pub const TCON4_HSP: u32 = 0x0000_0004;  // HSYNC polarity (1=active low)
-    pub const TCON4_DEP: u32 = 0x0000_0002;  // VDEN polarity (1=active low)
-    pub const TCON4_PCLKP: u32 = 0x0000_0001; // Pixel clock polarity (1=rising edge)
+    pub const TCON4_VSP: u32 = 0x0000_0008;  // VSYNC polarity (1=active high)
+    pub const TCON4_HSP: u32 = 0x0000_0004;  // HSYNC polarity (1=active high)
+    pub const TCON4_DEP: u32 = 0x0000_0002;  // VDEN polarity (1=active high)
+    pub const TCON4_PCLKP: u32 = 0x0000_0001; // Pixel clock polarity (1=falling edge)
 
 // MPU Command Register
 pub const REG_LCM_MPUCMD: u32 = VPOST_BA + 0x20;
@@ -713,7 +713,7 @@ pub const VPOST_S: u32 = 0x0000_0018;
 pub const VPOST_N0: u32 = 0x0000_0007;
 
 // APBIPRST / AHBCLK VPOST bits
-pub const VPOSTRST: u32 = 0x0000_0400; // VPOST Reset (in REG_APBIPRST)
+pub const VPOSTRST: u32 = 0x0000_0400; // VPOST Reset (in REG_AHBIPRST)
 pub const VPOST_CKE: u32 = 0x0800_0000; // VPOST Clock Enable (in REG_AHBCLK)
 
 // IRQ number
