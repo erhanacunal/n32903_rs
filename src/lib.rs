@@ -70,6 +70,7 @@ pub mod registers;
 pub mod spu;
 pub mod sys;
 pub mod timer;
+pub mod touch;
 pub mod uart;
 pub mod vpost;
 

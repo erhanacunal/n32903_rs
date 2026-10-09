@@ -86,7 +86,11 @@ unsafe fn cp15_setup(ttb: u32) {
         "MCR p15, 0, {ttb}, c2, c0, 0",
         // Domain access control: all domains client (AP bits checked).
         // Domain 0 is the one every descriptor uses.
-        "LDR {tmp}, =0x55555555",
+        // 0x55555555 built in registers (an LDR literal can end up out of
+        // range of the inline asm)
+        "MOV {tmp}, #0x55",
+        "ORR {tmp}, {tmp}, {tmp}, LSL #8",
+        "ORR {tmp}, {tmp}, {tmp}, LSL #16",
         "MCR p15, 0, {tmp}, c3, c0, 0",
         // Read control register, enable I-cache, D-cache, MMU
         "MRC p15, 0, {tmp}, c1, c0, 0",
