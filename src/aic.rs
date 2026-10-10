@@ -108,14 +108,49 @@ pub unsafe fn aic_initialize() {
     core::ptr::write_volatile(0x18 as *mut u32, 0xe59f_f018);
     core::ptr::write_volatile(0x1C as *mut u32, 0xe59f_f018);
 
-    // Install IRQ handler trampoline at 0x38
-    core::ptr::write_volatile(0x38 as *mut u32, aic_irq_handler as *const () as u32);
+    // Install the IRQ/FIQ entry trampolines at 0x38 / 0x3C.  They save the
+    // registers and return from the exception; the Rust dispatchers below
+    // are plain functions and can't be jumped to from the vector directly.
+    core::ptr::write_volatile(0x38 as *mut u32, aic_irq_entry as *const () as u32);
+    core::ptr::write_volatile(0x3C as *mut u32, aic_fiq_entry as *const () as u32);
 
-    // Install FIQ handler trampoline at 0x3C
-    core::ptr::write_volatile(0x3C as *mut u32, aic_fiq_handler as *const () as u32);
+    // The vectors were written through the D-cache: push them to SDRAM and
+    // drop stale I-cache lines (both harmless with the caches off).
+    crate::cache::dcache_clean();
+    core::arch::asm!(
+        "MCR p15, 0, {zero}, c7, c5, 0",
+        zero = in(reg) 0u32,
+        options(nostack),
+    );
 
     AIC_INITIALIZED = true;
 }
+
+extern "C" {
+    fn aic_irq_entry();
+    fn aic_fiq_entry();
+}
+
+// Exception entry stubs.  IRQ/FIQ mode have their own stacks (startup.s);
+// r0-r3, r12 and lr are the registers an AAPCS call may clobber.  Six
+// words keep the stack 8-byte aligned.  The `^` on the final LDM restores
+// CPSR from SPSR, returning to the interrupted mode.
+core::arch::global_asm!(
+    ".section .text.aic_entry, \"ax\"",
+    ".arm",
+    ".global aic_irq_entry",
+    "aic_irq_entry:",
+    "    SUB     lr, lr, #4",
+    "    STMFD   sp!, {{r0-r3, r12, lr}}",
+    "    BL      aic_irq_handler",
+    "    LDMFD   sp!, {{r0-r3, r12, pc}}^",
+    ".global aic_fiq_entry",
+    "aic_fiq_entry:",
+    "    SUB     lr, lr, #4",
+    "    STMFD   sp!, {{r0-r3, r12, lr}}",
+    "    BL      aic_fiq_handler",
+    "    LDMFD   sp!, {{r0-r3, r12, pc}}^",
+);
 
 // ============================================================================
 // Public API — Interrupt Management

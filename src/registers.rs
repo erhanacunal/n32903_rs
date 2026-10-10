@@ -203,6 +203,7 @@ pub const SMCR_ECC_CHK: u32 = 0x0000_0080;
 pub const SMCR_REDUN_AUTO_WEN: u32 = 0x0000_0010;
 pub const SMCR_REDUN_REN: u32 = 0x0000_0008;
 pub const SMCR_DRD_EN: u32 = 0x0000_0002;
+pub const SMCR_DWR_EN: u32 = 0x0000_0004; // DMA write data enable
 pub const SMCR_SM_SWRST: u32 = 0x0000_0001;
 
 // BCH T-sel values
@@ -388,9 +389,11 @@ pub const WL_7BIT: u32 = 0x02;
 pub const WL_8BIT: u32 = 0x03;
 
 // UART FSR (FIFO Status Register) bit fields
+pub const RX_OVER_IF: u32 = 0x0000_0001; // RX FIFO overflow (write 1 to clear)
+pub const RX_EMPTY: u32 = 0x0000_4000; // RX FIFO empty
 pub const TX_EMPTY: u32 = 0x0040_0000;
-pub const RX_NOT_EMPTY: u32 = 0x0000_0001;
 pub const TX_FULL: u32 = 0x0080_0000;
+pub const TE_FLAG: u32 = 0x1000_0000; // TX FIFO and shift register empty
 
 // UART BAUD (Baud Rate Register) bit fields
 pub const DIV_X_EN: u32 = 0x2000_0000;

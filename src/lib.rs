@@ -7,6 +7,7 @@
 //! - **`clock`** — System clock, PLL, and DDR SDRAM initialisation
 //! - **`uart`**   — UART0 (high-speed) and UART1 (console) with formatted output
 //! - **`gpio`**   — GPIO port A–E: direction, output, input, pull-up, interrupts
+//! - **`nand`**   — NAND flash (FMI/SM controller, DMA, BCH ECC, bad blocks)
 //! - **`timer`**  — Two 32-bit timers with event scheduler, delay, and watchdog
 //! - **`registers`** — Complete MMIO register map and access helpers
 //!
@@ -64,6 +65,7 @@ pub mod heap;
 pub mod i2c;
 pub mod lcd;
 pub mod mmu;
+pub mod nand;
 pub mod power;
 pub mod pwm;
 pub mod registers;
@@ -112,9 +114,12 @@ pub extern "C" fn rust_main() -> ! {
 // Panic Handler
 // ============================================================================
 
+#[cfg(feature = "panic-handler")]
 use core::panic::PanicInfo;
 
 /// Panic handler — prints file/line info via UART if possible, then loops.
+/// Disable the default `panic-handler` feature to supply your own.
+#[cfg(feature = "panic-handler")]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     unsafe {

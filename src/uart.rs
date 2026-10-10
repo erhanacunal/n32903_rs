@@ -190,10 +190,45 @@ impl Uart {
         }
     }
 
+    /// Transmit a single byte as-is (no `\n` expansion), for binary data.
+    pub unsafe fn put_raw(&self, c: u8) {
+        let off = self.port.offset();
+        while reg_read32(REG_UART0_FSR + off) & TX_FULL != 0 {}
+        reg_write8(REG_UART0_THR + off, c);
+    }
+
+    /// Wait until everything written has left the shift register.
+    pub unsafe fn flush(&self) {
+        let off = self.port.offset();
+        while reg_read32(REG_UART0_FSR + off) & TE_FLAG == 0 {}
+    }
+
+    /// Enable the receive interrupts: data available (FIFO at its trigger
+    /// level) and RX timeout (bytes left below the trigger level).  The
+    /// handler must drain the FIFO with [`Uart::getchar`] until it is
+    /// empty, which clears both.  The AIC side is up to the caller.
+    pub unsafe fn enable_rx_interrupt(&self) {
+        let off = self.port.offset();
+        reg_write32(
+            REG_UART0_IER + off,
+            reg_read32(REG_UART0_IER + off) | RDA_IEN | RTO_IEN | TIME_OUT_EN,
+        );
+    }
+
+    /// Clear a pending RX FIFO overflow flag; returns whether it was set.
+    pub unsafe fn clear_rx_overflow(&self) -> bool {
+        let off = self.port.offset();
+        let set = reg_read32(REG_UART0_FSR + off) & RX_OVER_IF != 0;
+        if set {
+            reg_write32(REG_UART0_FSR + off, RX_OVER_IF);
+        }
+        set
+    }
+
     /// Try to receive a byte (non-blocking). Returns `None` if no data.
     pub unsafe fn getchar(&self) -> Option<u8> {
         let off = self.port.offset();
-        if reg_read32(REG_UART0_FSR + off) & RX_NOT_EMPTY != 0 {
+        if reg_read32(REG_UART0_FSR + off) & RX_EMPTY == 0 {
             Some(reg_read8(REG_UART0_RBR + off))
         } else {
             None
@@ -384,7 +419,7 @@ pub unsafe fn uart_puts(s: &str) {
 /// Try to read a byte (non-blocking). `None` if no data available.
 pub unsafe fn uart_getchar() -> Option<u8> {
     let off = UART_PORT_OFFSET;
-    if reg_read32(REG_UART0_FSR + off) & RX_NOT_EMPTY != 0 {
+    if reg_read32(REG_UART0_FSR + off) & RX_EMPTY == 0 {
         Some(reg_read8(REG_UART0_RBR + off))
     } else {
         None

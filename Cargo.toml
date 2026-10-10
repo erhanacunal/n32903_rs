@@ -10,8 +10,11 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 
 [features]
+default = ["panic-handler"]
 # Global heap allocator for the `alloc` crate (needs "alloc" in build-std)
 heap = []
+# The crate's UART panic handler; turn off to provide your own
+panic-handler = []
 
 [profile.dev]
 panic = "abort"
