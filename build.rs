@@ -37,6 +37,6 @@ fn main() {
         }
     }
 
-    // No linker args — this is a staticlib; the application provides linker.ld
+    // No linker args — this is a library; the application provides linker.ld
     // and -nostartfiles.
 }

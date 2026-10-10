@@ -225,7 +225,8 @@ pub unsafe fn timer_stop(ch: TimerChannel) {
 
 /// Read the current tick count.
 pub unsafe fn timer_get_ticks(ch: TimerChannel) -> u32 {
-    TICK_COUNT[ch as usize]
+    // Volatile: the counter changes in the timer ISR, and callers poll it
+    core::ptr::read_volatile(core::ptr::addr_of!(TICK_COUNT[ch as usize]))
 }
 
 /// Reset the tick counter to zero.
