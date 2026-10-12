@@ -56,6 +56,18 @@ enum Mode {
     WaitTrigger = 3,
 }
 
+/// CPU clock (MHz) the `spin` counts below were tuned at.
+const SPIN_REF_MHZ: u32 = 96;
+
+/// Running CPU clock in MHz, read in [`Touch::init`]: the settle delays are
+/// busy loops, so they scale with the clock the loader chose.
+static mut CPU_MHZ: u32 = SPIN_REF_MHZ;
+
+/// Busy-wait `n` loop iterations as tuned at [`SPIN_REF_MHZ`].
+fn settle(n: u32) {
+    spin(n * unsafe { CPU_MHZ } / SPIN_REF_MHZ);
+}
+
 /// Conversion delay (ADC clocks) used by the firmware.
 const DELAY: u32 = 0x80;
 
@@ -113,6 +125,7 @@ impl Touch {
     /// # Safety
     /// Takes over the ADC (no other ADC channel can be used meanwhile).
     pub unsafe fn init(width: u16, height: u16, cal: Calibration) -> Self {
+        CPU_MHZ = (crate::clock::get_cpu_clock() / 1000).max(1);
         reg_write32(REG_APBCLK, reg_read32(REG_APBCLK) | ADC_CKE);
         // ADC clock: XIN (12 MHz), N0 = 0, N1 = 1 -> 6 MHz
         reg_write32(
@@ -166,7 +179,7 @@ impl Touch {
         // Back to waiting mode; the pen must still be down, otherwise the
         // last samples were taken while it was lifting off.
         set_mode(Mode::WaitTrigger, true);
-        spin(2_000);
+        settle(2_000);
         if !ok || !self.is_pressed() {
             return None;
         }
@@ -194,7 +207,7 @@ unsafe fn set_mode(mode: Mode, pull_up: bool) {
     // 4-wire type (0), optional pull-up, no MAV filter
     reg_write32(REG_ADC_TSC, if pull_up { TSC_PU_EN } else { 0 });
     reg_write32(REG_ADC_CON, reg_read32(REG_ADC_CON) | ADC_EN);
-    spin(500);
+    settle(500);
 }
 
 /// One auto-mode conversion: (ADC_XDATA, ADC_YDATA), 10 bits each.
