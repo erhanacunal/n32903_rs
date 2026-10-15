@@ -34,6 +34,7 @@ const REG_ADC_XDATA: u32 = ADC_BA + 0x0C;
 const REG_ADC_YDATA: u32 = ADC_BA + 0x10;
 
 // ADC_CON bits
+const WT_INT_EN: u32 = 1 << 23;
 const WT_INT: u32 = 1 << 20;
 const LVD_INT: u32 = 1 << 19;
 const ADC_INT: u32 = 1 << 18;
@@ -147,6 +148,30 @@ impl Touch {
     /// Whether the panel is pressed right now.
     pub fn is_pressed(&self) -> bool {
         unsafe { reg_read32(REG_ADC_TSC) & TSC_UD != 0 }
+    }
+
+    /// Raise `IRQ_ADC` on the next pen-down (waiting-for-trigger interrupt).
+    ///
+    /// There is no pen-up interrupt: after a pen-down the caller samples
+    /// with [`read`](Self::read) until the pen is up, then arms again.
+    /// `read` resets the ADC, which also disarms the interrupt.
+    ///
+    /// # Safety
+    /// Uses the ADC; must not run concurrently with other ADC use.
+    pub unsafe fn arm_pen_irq(&self) {
+        // Status bits are write-1-to-clear: ack a stale WT_INT, keep the rest.
+        let con = reg_read32(REG_ADC_CON) & !(WT_INT | ADC_INT | LVD_INT);
+        reg_write32(REG_ADC_CON, con | WT_INT);
+        reg_write32(REG_ADC_CON, con | WT_INT_EN);
+    }
+
+    /// Disable and acknowledge the pen-down interrupt (call from the ISR).
+    ///
+    /// # Safety
+    /// Uses the ADC; must not run concurrently with other ADC use.
+    pub unsafe fn disarm_pen_irq(&self) {
+        let con = reg_read32(REG_ADC_CON) & !(WT_INT_EN | WT_INT | ADC_INT | LVD_INT);
+        reg_write32(REG_ADC_CON, con | WT_INT);
     }
 
     /// Read the touch position.  `None` when not pressed, or when the

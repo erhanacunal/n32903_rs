@@ -306,6 +306,7 @@ pub const IRQ_EXTINT2: u32 = 4;
 pub const IRQ_EXTINT3: u32 = 5;
 pub const IRQ_TMR0: u32 = 14;
 pub const IRQ_TMR1: u32 = 15;
+pub const IRQ_ADC: u32 = 22;
 pub const IRQ_UART: u32 = 24;
 
 // IRQ level constants
