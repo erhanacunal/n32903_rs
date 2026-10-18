@@ -131,19 +131,52 @@ extern "C" {
     fn aic_fiq_entry();
 }
 
-// Exception entry stubs.  IRQ/FIQ mode have their own stacks (startup.s);
-// r0-r3, r12 and lr are the registers an AAPCS call may clobber.  Six
-// words keep the stack 8-byte aligned.  The `^` on the final LDM restores
-// CPSR from SPSR, returning to the interrupted mode.
+// Exception entry stubs.  IRQ/FIQ mode have their own stacks (startup.s).
+// The `^` on the final LDM restores CPSR from SPSR, returning to the
+// interrupted mode.
+//
+// The IRQ stub saves all of r0-r12 (14 words, 8-byte aligned) so that, when
+// an ISR asked the scheduler for a switch (`thread::sched_tick` →
+// `context_switch_interrupt` sets `switch_interrupt_flag`), it can rebuild
+// the interrupted thread's frame on its SVC stack in the `context_switch`
+// layout [cpsr, r0-r12, lr, pc] and resume the next thread instead.
 core::arch::global_asm!(
     ".section .text.aic_entry, \"ax\"",
     ".arm",
     ".global aic_irq_entry",
     "aic_irq_entry:",
     "    SUB     lr, lr, #4",
-    "    STMFD   sp!, {{r0-r3, r12, lr}}",
+    "    STMFD   sp!, {{r0-r12, lr}}",
     "    BL      aic_irq_handler",
-    "    LDMFD   sp!, {{r0-r3, r12, pc}}^",
+    "    LDR     r0, =switch_interrupt_flag",
+    "    LDR     r1, [r0]",
+    "    CMP     r1, #1",
+    "    BEQ     aic_irq_switch",
+    "    LDMFD   sp!, {{r0-r12, pc}}^",
+    "aic_irq_switch:",
+    "    MOV     r1, #0",
+    "    STR     r1, [r0]",                 // clear switch flag
+    "    MOV     r1, sp",                   // r1 -> saved r0-r3 on IRQ stack
+    "    ADD     sp, sp, #16",
+    "    LDMFD   sp!, {{r4-r12, lr}}",      // lr = interrupted PC (already -4)
+    "    MRS     r0, spsr",                 // r0 = interrupted CPSR
+    "    MOV     r2, lr",
+    "    MSR     cpsr_c, #0xD3",            // SVC mode, IRQ+FIQ masked
+    "    STMFD   sp!, {{r2}}",              // pc
+    "    STMFD   sp!, {{r4-r12, lr}}",      // r4-r12, lr_svc
+    "    LDMFD   r1, {{r1-r4}}",            // r0-r3 from the IRQ stack
+    "    STMFD   sp!, {{r1-r4}}",
+    "    STMFD   sp!, {{r0}}",              // cpsr
+    "    LDR     r4, =interrupt_from_thread",
+    "    LDR     r5, [r4]",
+    "    STR     sp, [r5]",                 // from_thread->sp = svc_sp
+    "    LDR     r6, =interrupt_to_thread",
+    "    LDR     r6, [r6]",
+    "    LDR     sp, [r6]",                 // sp = to_thread->sp
+    "    LDMFD   sp!, {{r4}}",
+    "    MSR     spsr_cxsf, r4",
+    "    LDMFD   sp!, {{r0-r12, lr, pc}}^",
+    "    .ltorg",
     ".global aic_fiq_entry",
     "aic_fiq_entry:",
     "    SUB     lr, lr, #4",

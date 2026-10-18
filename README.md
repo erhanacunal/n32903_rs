@@ -27,6 +27,9 @@ Peripheral modules exposed by the library:
 | `spu`       | Sound Processing Unit                                             |
 | `vpost`     | Video post-processor / LCD output                                 |
 | `sys`       | System control helpers                                            |
+| `cpu`       | CPSR interrupt masking, WFI                                       |
+| `thread`    | Preemptive priority scheduler (32 threads / 32 priorities)        |
+| `ipc`       | Semaphore, mutex, event flags, message queue, signals, spinlock   |
 | `registers` | Complete MMIO register map and access helpers                     |
 
 ## Target
