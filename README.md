@@ -17,6 +17,8 @@ Peripheral modules exposed by the library:
 | `uart`      | UART0 (high-speed) and UART1 (console) with formatted output      |
 | `gpio`      | GPIO ports A–E: direction, output, input, pull-up, interrupts     |
 | `timer`     | Two 32-bit timers with event scheduler, delay, and watchdog       |
+| `nand`      | NAND flash: FMI/SM controller, DMA, BCH ECC, bad blocks           |
+| `sd`        | SD card host (SIC SD engine): init, 4-bit DMA read/write          |
 | `aic`       | Advanced Interrupt Controller                                     |
 | `cache`     | Instruction/data cache control                                    |
 | `mmu`       | Memory Management Unit setup                                      |

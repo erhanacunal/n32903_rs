@@ -8,6 +8,7 @@
 //! - **`uart`**   — UART0 (high-speed) and UART1 (console) with formatted output
 //! - **`gpio`**   — GPIO port A–E: direction, output, input, pull-up, interrupts
 //! - **`nand`**   — NAND flash (FMI/SM controller, DMA, BCH ECC, bad blocks)
+//! - **`sd`**     — SD card host (SIC SD engine, 4-bit, DMA): init, read, write
 //! - **`timer`**  — Two 32-bit timers with event scheduler, delay, and watchdog
 //! - **`registers`** — Complete MMIO register map and access helpers
 //!
@@ -71,6 +72,7 @@ pub mod nand;
 pub mod power;
 pub mod pwm;
 pub mod registers;
+pub mod sd;
 pub mod spu;
 pub mod sys;
 pub mod thread;

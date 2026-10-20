@@ -595,11 +595,7 @@ fn phys(ptr: u32) -> u32 {
 
 /// Invalidate the D-cache lines covering `[addr, addr + len)`.
 unsafe fn invalidate_range(addr: u32, len: u32) {
-    let mut a = addr & !(BUF_ALIGN as u32 - 1);
-    while a < addr + len {
-        core::arch::asm!("MCR p15, 0, {0}, c7, c6, 1", in(reg) a, options(nostack));
-        a += BUF_ALIGN as u32;
-    }
+    cache::dcache_invalidate_range(addr, len);
 }
 
 // ============================================================================

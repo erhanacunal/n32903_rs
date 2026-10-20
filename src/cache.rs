@@ -116,6 +116,20 @@ pub unsafe fn dcache_clean() {
     );
 }
 
+/// D-cache line size.
+pub const CACHE_LINE: u32 = 32;
+
+/// Invalidate (drop without writing back) the D-cache lines covering
+/// `[addr, addr + len)`. For DMA receive buffers: clean first if other data
+/// shares those lines.
+pub unsafe fn dcache_invalidate_range(addr: u32, len: u32) {
+    let mut a = addr & !(CACHE_LINE - 1);
+    while a < addr + len {
+        core::arch::asm!("MCR p15, 0, {0}, c7, c6, 1", in(reg) a, options(nostack));
+        a += CACHE_LINE;
+    }
+}
+
 /// Wait until all buffered writes have reached memory.
 #[inline(always)]
 pub unsafe fn drain_write_buffer() {

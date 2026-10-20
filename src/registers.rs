@@ -103,6 +103,11 @@ pub const SYSTEM_N1: u32 = 0x0000_0F00;
 pub const SYSTEM_S: u32 = 0x0000_0018;
 pub const SYSTEM_N0: u32 = 0x0000_0007;
 
+// CLKDIV2 bit fields (SD engine clock = source / (N0 + 1) / (N1 + 1))
+pub const SD_N1: u32 = 0xFF00_0000; // divider
+pub const SD_S: u32 = 0x0018_0000; // source: 00 XIN, 01 X32K, 10 APLL, 11 UPLL
+pub const SD_N0: u32 = 0x0007_0000; // pre-divider
+
 // CLKDIV3 bit fields (UART/ADC dividers)
 pub const UART1_N: u32 = 0x0000_FF00;
 pub const UART0_N: u32 = 0x0000_00FF;
@@ -187,9 +192,70 @@ pub const REG_BCH_ECC_ADDR0: u32 = FMI_BA + 0x100;
 pub const REG_BCH_ECC_DATA0: u32 = FMI_BA + 0x160;
 pub const REG_SMRA_0: u32 = FMI_BA + 0x200;
 
+pub const REG_FMIIER: u32 = FMI_BA + 0x004;
+pub const REG_FMIISR: u32 = FMI_BA + 0x008;
+
 // FMICR
 pub const FMI_SM_EN: u32 = 0x08;
+pub const FMI_SD_EN: u32 = 0x02;
 pub const FMI_SWRST: u32 = 0x01;
+
+// SD host
+pub const REG_SDCR: u32 = FMI_BA + 0x020; // control
+pub const REG_SDARG: u32 = FMI_BA + 0x024; // command argument
+pub const REG_SDIER: u32 = FMI_BA + 0x028; // interrupt enable
+pub const REG_SDISR: u32 = FMI_BA + 0x02C; // interrupt status
+pub const REG_SDRSP0: u32 = FMI_BA + 0x030; // response bits 47..16
+pub const REG_SDRSP1: u32 = FMI_BA + 0x034; // response bits 15..8
+pub const REG_SDBLEN: u32 = FMI_BA + 0x038; // block length - 1
+pub const REG_SDTMOUT: u32 = FMI_BA + 0x03C; // timeout (SD clocks)
+
+// SDCR bit fields
+pub const SDCR_CLK_KEEP1: u32 = 0x8000_0000;
+pub const SDCR_SDPORT: u32 = 0x6000_0000; // port select
+pub const SDCR_SDPORT_0: u32 = 0x0000_0000;
+pub const SDCR_SDPORT_1: u32 = 0x2000_0000;
+pub const SDCR_SDPORT_2: u32 = 0x4000_0000;
+pub const SDCR_CLK_KEEP2: u32 = 0x1000_0000;
+pub const SDCR_SDNWR: u32 = 0x0F00_0000; // Nwr for block write
+pub const SDCR_BLKCNT: u32 = 0x00FF_0000; // blocks to transfer
+pub const SDCR_DBW: u32 = 0x0000_8000; // 4-bit data bus
+pub const SDCR_SWRST: u32 = 0x0000_4000;
+pub const SDCR_CMD_CODE: u32 = 0x0000_3F00;
+pub const SDCR_CLK_KEEP: u32 = 0x0000_0080;
+pub const SDCR_8CLK_OE: u32 = 0x0000_0040;
+pub const SDCR_74CLK_OE: u32 = 0x0000_0020;
+pub const SDCR_R2_EN: u32 = 0x0000_0010; // 136-bit response in
+pub const SDCR_DO_EN: u32 = 0x0000_0008; // data out
+pub const SDCR_DI_EN: u32 = 0x0000_0004; // data in
+pub const SDCR_RI_EN: u32 = 0x0000_0002; // 48-bit response in
+pub const SDCR_CO_EN: u32 = 0x0000_0001; // command out
+
+// SDIER bit fields
+pub const SDIER_CDSRC: u32 = 0x4000_0000; // card detect: 1 = DAT3, 0 = GPIO
+pub const SDIER_R1B_IEN: u32 = 0x0100_0000;
+pub const SDIER_WKUP_EN: u32 = 0x0000_4000;
+pub const SDIER_DITO_IEN: u32 = 0x0000_2000;
+pub const SDIER_RITO_IEN: u32 = 0x0000_1000;
+pub const SDIER_SDIO_IEN: u32 = 0x0000_0400;
+pub const SDIER_CD_IEN: u32 = 0x0000_0100;
+pub const SDIER_CRC_IEN: u32 = 0x0000_0002;
+pub const SDIER_BLKD_IEN: u32 = 0x0000_0001;
+
+// SDISR bit fields
+pub const SDISR_R1B_IF: u32 = 0x0100_0000;
+pub const SDISR_SD_DATA1: u32 = 0x0004_0000;
+pub const SDISR_CD_CARD: u32 = 0x0001_0000;
+pub const SDISR_DITO_IF: u32 = 0x0000_2000;
+pub const SDISR_RITO_IF: u32 = 0x0000_1000;
+pub const SDISR_SDIO_IF: u32 = 0x0000_0400;
+pub const SDISR_CD_IF: u32 = 0x0000_0100;
+pub const SDISR_SD_DATA0: u32 = 0x0000_0080; // DAT0 level (low = busy)
+pub const SDISR_CRC: u32 = 0x0000_0070; // CRC status
+pub const SDISR_CRC_16: u32 = 0x0000_0008; // 1 = data CRC ok
+pub const SDISR_CRC_7: u32 = 0x0000_0004; // 1 = response CRC ok
+pub const SDISR_CRC_IF: u32 = 0x0000_0002;
+pub const SDISR_BLKD_IF: u32 = 0x0000_0001; // block transfer done
 
 // SMCSR bit fields
 pub const SMCR_CS1: u32 = 0x0400_0000;
@@ -239,10 +305,19 @@ pub const SMRE_REA128_EXT: u32 = 0x0000_01FF;
 pub const REG_DMACCSR: u32 = DMAC_BA + 0x400;
 pub const REG_DMACSAR: u32 = DMAC_BA + 0x408;
 pub const REG_DMACBCR: u32 = DMAC_BA + 0x40C;
+pub const REG_DMACIER: u32 = DMAC_BA + 0x410;
+pub const REG_DMACISR: u32 = DMAC_BA + 0x414;
+/// Shared buffer: R2 responses (CID / CSD) land here.
+pub const REG_FB_0: u32 = DMAC_BA + 0x000;
 
 // DMACCSR bit fields
 pub const FMI_BUSY: u32 = 0x0000_0200;
+pub const DMAC_SWRST: u32 = 0x0000_0002;
 pub const DMAC_EN: u32 = 0x0000_0001;
+
+// DMACISR / DMACIER
+pub const TABORT_IF: u32 = 0x0000_0001; // target abort
+pub const TABORT_IE: u32 = 0x0000_0001;
 
 // ============================================================================
 // ============================================================================
