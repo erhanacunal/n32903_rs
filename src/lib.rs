@@ -9,6 +9,8 @@
 //! - **`gpio`**   — GPIO port A–E: direction, output, input, pull-up, interrupts
 //! - **`nand`**   — NAND flash (FMI/SM controller, DMA, BCH ECC, bad blocks)
 //! - **`sd`**     — SD card host (SIC SD engine, 4-bit, DMA): init, read, write
+//! - **`spi`**    — SPI0/SPI1 master (polled): open, clock, slave select, transfers
+//! - **`spiflash`** — SPI NOR flash on SPI0/SS0: ID, erase (4 KB / 64 KB / chip), program, read
 //! - **`timer`**  — Two 32-bit timers with event scheduler, delay, and watchdog
 //! - **`registers`** — Complete MMIO register map and access helpers
 //!
@@ -73,6 +75,8 @@ pub mod power;
 pub mod pwm;
 pub mod registers;
 pub mod sd;
+pub mod spi;
+pub mod spiflash;
 pub mod spu;
 pub mod sys;
 pub mod thread;

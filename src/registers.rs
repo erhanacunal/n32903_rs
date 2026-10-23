@@ -63,6 +63,8 @@ pub const TMR1RST: u32 = 0x0000_0020; // Timer 1 Reset
 pub const TMR0RST: u32 = 0x0000_0010; // Timer 0 Reset
 pub const I2CRST: u32 = 0x0000_0100;  // I2C Reset
 pub const PWMRST: u32 = 0x0000_0400;  // PWM Reset
+pub const SPI0RST: u32 = 0x0000_1000; // SPI 0 Reset
+pub const SPI1RST: u32 = 0x0000_2000; // SPI 1 Reset
 
 // ============================================================================
 // Clock Controller Registers
@@ -97,6 +99,8 @@ pub const UART0_CKE: u32 = 0x0000_0008; // UART0 Clock Enable
 pub const PWM_CKE: u32 = 0x0000_0020;   // PWM Clock Enable
 pub const I2C_CKE: u32 = 0x0000_0002;   // I2C Clock Enable
 pub const RTC_CKE: u32 = 0x0000_0004;
+pub const SPIMS0_CKE: u32 = 0x0000_0040; // SPI 0 (master / slave) Clock Enable
+pub const SPIMS1_CKE: u32 = 0x0000_0080; // SPI 1 (master only) Clock Enable
 
 // CLKDIV0 bit fields
 pub const SYSTEM_N1: u32 = 0x0000_0F00;
@@ -606,6 +610,48 @@ pub const WDT_INTERVAL_0_5S: u32 = 0x00; // 0.5 seconds
 pub const WDT_INTERVAL_5S: u32 = 0x10;   // 5 seconds
 pub const WDT_INTERVAL_10S: u32 = 0x20;  // 10 seconds
 pub const WDT_INTERVAL_20S: u32 = 0x30;  // 20 seconds
+
+// ============================================================================
+// SPI Registers (SPI0_BA / SPI1_BA; SPI1 = SPI0 + 0x400)
+// ============================================================================
+pub const SPI_PORT_STRIDE: u32 = SPI1_BA - SPI0_BA;
+
+pub const REG_SPI0_CNTRL: u32 = SPI0_BA + 0x00;
+pub const REG_SPI0_DIVIDER: u32 = SPI0_BA + 0x04;
+pub const REG_SPI0_SSR: u32 = SPI0_BA + 0x08;
+pub const REG_SPI0_RX0: u32 = SPI0_BA + 0x10;
+pub const REG_SPI0_RX1: u32 = SPI0_BA + 0x14;
+pub const REG_SPI0_RX2: u32 = SPI0_BA + 0x18;
+pub const REG_SPI0_RX3: u32 = SPI0_BA + 0x1C;
+pub const REG_SPI0_TX0: u32 = SPI0_BA + 0x10;
+pub const REG_SPI0_TX1: u32 = SPI0_BA + 0x14;
+pub const REG_SPI0_TX2: u32 = SPI0_BA + 0x18;
+pub const REG_SPI0_TX3: u32 = SPI0_BA + 0x1C;
+pub const REG_SPI0_JS: u32 = SPI0_BA + 0x20;
+pub const REG_SPI0_TURBO: u32 = SPI0_BA + 0x24;
+pub const REG_SPI0_EDMA: u32 = SPI0_BA + 0x28;
+
+// CNTRL bit fields
+pub const SPI_BYTE_ENDIN: u32 = 1 << 20;
+pub const SPI_BYTE_SLEEP: u32 = 1 << 19;
+pub const SPI_SLAVE: u32 = 1 << 18;
+pub const SPI_IE: u32 = 1 << 17;       // Interrupt Enable
+pub const SPI_IFG: u32 = 1 << 16;      // Interrupt Flag
+pub const SPI_SLEEP: u32 = 0xF << 12;  // Suspend Interval
+pub const SPI_CLKP: u32 = 1 << 11;     // Clock idles high
+pub const SPI_LSB: u32 = 1 << 10;      // Send LSB first
+pub const SPI_TX_NUM: u32 = 0x3 << 8;  // Transmit/Receive Numbers (n + 1 words)
+pub const SPI_TX_BIT_LEN: u32 = 0x1F << 3; // Transmit Bit Length (0 = 32)
+pub const SPI_TX_NEG: u32 = 1 << 2;    // Transmit On Negative Edge
+pub const SPI_RX_NEG: u32 = 1 << 1;    // Receive On Negative Edge
+pub const SPI_GO_BUSY: u32 = 1 << 0;   // Go and Busy Status
+
+// SSR bit fields
+pub const SPI_LTRIG_FLAG: u32 = 1 << 5;
+pub const SPI_SS_LTRIG: u32 = 1 << 4;  // Level trigger
+pub const SPI_ASS: u32 = 1 << 3;       // Automatic Slave Select
+pub const SPI_SS_LVL: u32 = 1 << 2;    // Slave Select active high
+pub const SPI_SSR: u32 = 0x3;          // Slave Select (one bit per SS pin)
 
 // ============================================================================
 // RTC Registers

@@ -19,6 +19,8 @@ Peripheral modules exposed by the library:
 | `timer`     | Two 32-bit timers with event scheduler, delay, and watchdog       |
 | `nand`      | NAND flash: FMI/SM controller, DMA, BCH ECC, bad blocks           |
 | `sd`        | SD card host (SIC SD engine): init, 4-bit DMA read/write          |
+| `spi`       | SPI0/SPI1 master (polled): open, clock, slave select, transfers   |
+| `spiflash`  | SPI NOR flash on SPI0/SS0: ID, 4 KB/64 KB/chip erase, program, read |
 | `aic`       | Advanced Interrupt Controller                                     |
 | `cache`     | Instruction/data cache control                                    |
 | `mmu`       | Memory Management Unit setup                                      |
