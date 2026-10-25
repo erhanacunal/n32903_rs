@@ -837,6 +837,11 @@ pub const VPOST_N1: u32 = 0x0000_FF00;
 pub const VPOST_S: u32 = 0x0000_0018;
 pub const VPOST_N0: u32 = 0x0000_0007;
 
+// CLKDIV1 audio DAC clock bits
+pub const ADO_N1: u32 = 0xFF00_0000; // divide number (bits 31:24)
+pub const ADO_S: u32 = 0x0018_0000; // source (bits 20:19): 0 XIN, 1 X32K, 2 APLL, 3 UPLL
+pub const ADO_N0: u32 = 0x0007_0000; // pre-divide number (bits 18:16)
+
 // APBIPRST / AHBCLK VPOST bits
 pub const VPOSTRST: u32 = 0x0000_0400; // VPOST Reset (in REG_AHBIPRST)
 pub const VPOST_CKE: u32 = 0x0800_0000; // VPOST Clock Enable (in REG_AHBCLK)

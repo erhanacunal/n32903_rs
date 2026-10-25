@@ -1,13 +1,19 @@
 //! SPU (Sound Processing Unit) driver for N32903 (W55FA93)
-//! Ported from DrvSPU.c, SPU.c, DrvSPU.h, and spu.h
+//! Port of the vendor `SPU/Src/DrvSPU.c` and `SPU/Src/SPU.c`
+//! (N32905 NonOS BSP).
 //!
-//! 32-channel audio DMA engine with equalizer, volume, PAN, and DAC
-//! control.  Supports PCM16 (mono/stereo), MDPCM, LP8, and tone
-//! generation formats.
+//! 32-channel audio DMA engine with equalizer, volume, PAN and DAC
+//! control. Supports PCM16 (mono/stereo), MDPCM, LP8 and tone formats.
 //!
-//! The SPU reads samples from a ring buffer in SDRAM via DMA.
-//! Interrupts fire at half-buffer and end-of-buffer thresholds so the
-//! application can refill the consumed half.
+//! Playback (`open` → `dac_on` → `start_play`) uses channel 0 in stereo
+//! PCM16 mode: the SPU loops over a ring buffer in SDRAM by DMA, and
+//! interrupts at its threshold (half) and end addresses, so the consumed
+//! half can be refilled by the [`SpuCallback`] passed to `start_play`.
+//!
+//! Differences from the vendor code: waits on `CH_FN` are bounded, the ring
+//! buffer is supplied by the caller (any size, 256-byte aligned) instead of
+//! a fixed 32 KB array, `enable_int` accepts several event bits at once, and
+//! `sysDelay` ticks (10 ms) are written as milliseconds.
 //!
 //! # Safety
 //!
@@ -22,7 +28,7 @@ use crate::registers::*;
 /// SPU channel index (0–31)
 pub type SpuChannel = u32;
 
-/// Audio source format
+/// Audio source format (`SRC_TYPE`)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
 pub enum SpuSrcType {
@@ -31,7 +37,9 @@ pub enum SpuSrcType {
     Pcm16 = SPU_SRC_PCM16,
     Tone = SPU_SRC_TONE,
     Pcm16Mono = SPU_SRC_PCM16_MONO,
+    /// Stereo PCM16, left sample in bits 15:0 of each 32-bit word.
     Pcm16StereoLeft = SPU_SRC_PCM16_STEREO_L,
+    /// Stereo PCM16, right sample in bits 31:16 of each 32-bit word.
     Pcm16StereoRight = SPU_SRC_PCM16_STEREO_R,
 }
 
@@ -51,544 +59,570 @@ pub enum SpuEqGain {
     P1dB, P2dB, P3dB, P4dB, P5dB, P6dB, P7dB, P8dB,
 }
 
-/// Sample rate presets
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SpuSampleRate {
-    Hz48000 = 48000,
-    Hz44100 = 44100,
-    Hz32000 = 32000,
-    Hz24000 = 24000,
-    Hz22050 = 22050,
-    Hz16000 = 16000,
-    Hz12000 = 12000,
-    Hz11025 = 11025,
-    Hz8000 = 8000,
-}
-
-/// SPU interrupt event types (bitmask)
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct SpuInt(u32);
-
-impl SpuInt {
-    pub const THRESHOLD: u32 = TH_FG;
-    pub const END_ADDR: u32 = END_FG;
-    pub const END_EVENT: u32 = EV_END_FG;
-    pub const LOOP_START: u32 = EV_LP_FG;
-    pub const SILENT: u32 = EV_SLN_FG;
+/// Channel event bits (`DRVSPU_*_INT`): the event's flag bit in
+/// `CH_EVENT`; the matching enable bit is 8 positions lower.
+pub mod int {
+    use crate::registers::*;
     pub const USER: u32 = EV_USR_FG;
-    pub const ALL: u32 = TH_FG | END_FG | EV_END_FG | EV_LP_FG | EV_SLN_FG | EV_USR_FG;
+    pub const SILENT: u32 = EV_SLN_FG;
+    pub const LOOP_START: u32 = EV_LP_FG;
+    pub const END: u32 = EV_END_FG;
+    /// End address reached (the second half has been played).
+    pub const END_ADDRESS: u32 = END_FG;
+    /// Threshold address reached (the first half has been played).
+    pub const TH_ADDRESS: u32 = TH_FG;
+    pub const ALL: u32 = USER | SILENT | LOOP_START | END | END_ADDRESS | TH_ADDRESS;
 }
 
-/// SPU interrupt callback
-pub type SpuCallback = unsafe extern "C" fn(buf: *const u8);
+/// Refill callback, called from the SPU interrupt with the (uncached)
+/// address of the half of the ring buffer that has just been played.
+pub type SpuCallback = unsafe fn(half: *mut u8);
 
-/// Default fragment size (32 KB) — half-buffer for double-buffering
-pub const SPU_FRAG_SIZE: usize = 32 * 1024;
-/// Half of fragment size
-pub const SPU_HALF_FRAG_SIZE: usize = SPU_FRAG_SIZE / 2;
+/// Errors
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpuError {
+    /// Channel index ≥ 32
+    WrongChannel,
+    /// Ring buffer not 256-byte aligned, or its size not a multiple of 512
+    BadBuffer,
+}
 
 // ============================================================================
 // Static State
 // ============================================================================
 
-/// Playback buffer (256-byte aligned)
-#[repr(align(256))]
-#[allow(dead_code)]
-struct PlayBuffer([u8; SPU_FRAG_SIZE]);
+/// Refill callbacks per channel (vendor `g_pfn*EventCallBack`): threshold
+/// and end address are the only events with a buffer to refill.
+static mut TH_CALLBACKS: [Option<SpuCallback>; 32] = [None; 32];
+static mut END_CALLBACKS: [Option<SpuCallback>; 32] = [None; 32];
 
-static mut PLAY_BUFFER: PlayBuffer = PlayBuffer([0u8; SPU_FRAG_SIZE]);
+/// Ring buffer used by `open` / the ISR (uncached address, size in bytes).
+static mut PLAY_BUF: u32 = 0;
+static mut PLAY_SIZE: u32 = 0;
 
-/// Callbacks per channel per event type (6 event types × 32 channels)
-static mut THRESHOLD_CALLBACKS: [Option<SpuCallback>; 32] = [None; 32];
-static mut END_ADDR_CALLBACKS: [Option<SpuCallback>; 32] = [None; 32];
+/// The DAC power-up level from `dac_on`, reused by `dac_off`.
+static mut DAC_LEVEL: u8 = 0;
+
+/// Upper bound on a `CH_FN` busy wait (the vendor waits forever).
+const FN_POLLS: u32 = 1_000_000;
+
+/// Uncached alias of SDRAM addresses (bit 31): the SPU reads by DMA, so the
+/// CPU writes the ring buffer through this alias.
+pub const UNCACHED: u32 = 0x8000_0000;
 
 // ============================================================================
-// Core Hardware Control
+// Channel register window
 // ============================================================================
 
-/// Open the SPU hardware: enable clocks, reset, initialise FIFO.
-pub unsafe fn spu_open() {
-    // Enable clocks
-    reg_write32(REG_AHBCLK, reg_read32(REG_AHBCLK) | ADO_CKE | SPU_CKE | HCLK4_CKE);
-
-    // Disable SPU, set FIFO size = 4
-    reg_write32(REG_SPU_CTRL, 0x0400_0000);
-
-    // Reset
-    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
-    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) | SPU_SWRST);
-    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
-
-    // Disable all channels
-    reg_write32(REG_SPU_CH_EN, 0);
-
-    // Clear interrupts for all channels
-    for ch in 0..32u32 {
-        spu_clear_int(ch, SpuInt::ALL);
-        spu_disable_int(ch, SpuInt::ALL);
+#[inline]
+unsafe fn wait_fn() {
+    let mut n = FN_POLLS;
+    while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 && n > 0 {
+        n -= 1;
     }
 }
 
-/// Close the SPU hardware.
-pub unsafe fn spu_close() {
+/// Load channel `ch` into the shared register window.
+unsafe fn select(ch: SpuChannel) {
+    wait_fn();
+    reg_write32(REG_SPU_CH_CTRL, (reg_read32(REG_SPU_CH_CTRL) & !CH_NO) | (ch << 24));
+    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | CH_CTRL_LOAD);
+    wait_fn();
+}
+
+/// Write the whole window back to the selected channel.
+unsafe fn update_all() {
+    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | CH_CTRL_UPDATE_ALL);
+    wait_fn();
+}
+
+/// Write back only the `partial` fields (`UP_*`) of the selected channel.
+unsafe fn update_partial(partial: u32) {
+    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) & !CH_CTRL_UPDATE_ALL_PARTIALS);
+    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | partial | CH_CTRL_UPDATE_PARTIAL);
+    wait_fn();
+}
+
+#[inline]
+fn check(ch: SpuChannel) -> Result<(), SpuError> {
+    if ch < 32 { Ok(()) } else { Err(SpuError::WrongChannel) }
+}
+
+// ============================================================================
+// Core Hardware Control (DrvSPU_Open / Close / StartPlay / StopPlay)
+// ============================================================================
+
+/// Enable the SPU clocks and reset the engine; all channels off, all
+/// channel interrupts cleared and disabled.
+pub unsafe fn drv_open() {
+    reg_write32(REG_AHBCLK, reg_read32(REG_AHBCLK) | ADO_CKE | SPU_CKE | HCLK4_CKE);
+    reg_write32(REG_SPU_CTRL, 0);
+    reg_write32(REG_SPU_CTRL, SPU_FIFO_SIZE);
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) | SPU_SWRST);
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
+    reg_write32(REG_SPU_CH_EN, 0);
+    for ch in 0..32 {
+        let _ = clear_int(ch, int::ALL);
+        let _ = disable_int(ch, int::ALL);
+    }
+}
 
+/// Reset and disable the SPU and stop its clocks.
+pub unsafe fn drv_close() {
+    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
+    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) | SPU_SWRST);
+    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_SWRST);
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_EN);
-
     reg_write32(REG_AHBCLK, reg_read32(REG_AHBCLK) & !ADO_CKE & !SPU_CKE);
 }
 
-/// Enable the SPU (start DMA).
-pub unsafe fn spu_enable() {
+/// Start the engine (all enabled channels play).
+pub unsafe fn drv_start_play() {
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) | SPU_EN);
 }
 
-/// Disable the SPU (stop DMA).
-pub unsafe fn spu_disable() {
+/// Stop the engine.
+pub unsafe fn drv_stop_play() {
     reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_EN);
 }
 
-/// Start playback on all enabled channels.
-pub unsafe fn spu_start_play() {
-    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) | SPU_EN);
-}
-
-/// Stop playback.
-pub unsafe fn spu_stop_play() {
-    reg_write32(REG_SPU_CTRL, reg_read32(REG_SPU_CTRL) & !SPU_EN);
+/// True while the engine is enabled.
+pub unsafe fn is_playing() -> bool {
+    reg_read32(REG_SPU_CTRL) & SPU_EN != 0
 }
 
 // ============================================================================
 // Channel Management
 // ============================================================================
 
-/// Open (enable) a channel.
-pub unsafe fn spu_channel_open(ch: SpuChannel) -> Result<(), ()> {
-    if ch >= 32 { return Err(()); }
+pub unsafe fn channel_open(ch: SpuChannel) -> Result<(), SpuError> {
+    check(ch)?;
     reg_write32(REG_SPU_CH_EN, reg_read32(REG_SPU_CH_EN) | (1 << ch));
     Ok(())
 }
 
-/// Close (disable) a channel.
-pub unsafe fn spu_channel_close(ch: SpuChannel) -> Result<(), ()> {
-    if ch >= 32 { return Err(()); }
+pub unsafe fn channel_close(ch: SpuChannel) -> Result<(), SpuError> {
+    check(ch)?;
     reg_write32(REG_SPU_CH_EN, reg_read32(REG_SPU_CH_EN) & !(1 << ch));
     Ok(())
 }
 
-/// Check if a channel is enabled.
-pub unsafe fn spu_is_channel_enabled(ch: SpuChannel) -> bool {
-    reg_read32(REG_SPU_CH_EN) & (1 << ch) != 0
+pub unsafe fn is_channel_enabled(ch: SpuChannel) -> bool {
+    ch < 32 && reg_read32(REG_SPU_CH_EN) & (1 << ch) != 0
 }
 
-/// Select a channel for subsequent register operations.
-/// The SPU uses a shared register window — CH_NO selects the active channel.
-unsafe fn spu_select_channel(ch: SpuChannel) {
-    reg_write32(REG_SPU_CH_CTRL, (reg_read32(REG_SPU_CH_CTRL) & !CH_NO) | (ch << 24));
-    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | CH_CTRL_LOAD);
-    while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 {}
+pub unsafe fn channel_pause(ch: SpuChannel) -> Result<(), SpuError> {
+    check(ch)?;
+    reg_write32(REG_SPU_CH_PAUSE, reg_read32(REG_SPU_CH_PAUSE) | (1 << ch));
+    Ok(())
 }
 
-/// Upload channel settings to hardware.
-unsafe fn spu_upload_settings(partial: u32) {
-    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) & !CH_CTRL_UPDATE_ALL_PARTIALS);
-    let cmd = if partial != 0 {
-        CH_CTRL_UPDATE_PARTIAL | (partial & CH_CTRL_UPDATE_ALL_PARTIALS)
-    } else {
-        CH_CTRL_UPDATE_ALL
-    };
-    reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | cmd);
-    while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 {}
+pub unsafe fn channel_resume(ch: SpuChannel) -> Result<(), SpuError> {
+    check(ch)?;
+    reg_write32(REG_SPU_CH_PAUSE, reg_read32(REG_SPU_CH_PAUSE) & !(1 << ch));
+    Ok(())
 }
 
 // ============================================================================
-// Channel Configuration
+// Channel Addresses
 // ============================================================================
 
-/// Set the source buffer base (start) address for a channel.
-pub unsafe fn spu_set_base_address(ch: SpuChannel, addr: u32) {
-    spu_select_channel(ch);
-    reg_write32(REG_SPU_S_ADDR, addr);
-    spu_upload_settings(UP_DFA);
+unsafe fn set_addr_reg(ch: SpuChannel, reg: u32, addr: u32) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    reg_write32(reg, addr);
+    update_all();
+    Ok(())
 }
 
-/// Set the threshold (half-buffer) address for a channel.
-pub unsafe fn spu_set_threshold_address(ch: SpuChannel, addr: u32) {
-    spu_select_channel(ch);
-    reg_write32(REG_SPU_M_ADDR, addr);
-    spu_upload_settings(0);
+unsafe fn get_reg(ch: SpuChannel, reg: u32) -> u32 {
+    if ch >= 32 {
+        return 0;
+    }
+    select(ch);
+    reg_read32(reg)
 }
 
-/// Set the end (wrap) address for a channel.
-pub unsafe fn spu_set_end_address(ch: SpuChannel, addr: u32) {
-    spu_select_channel(ch);
-    reg_write32(REG_SPU_E_ADDR, addr);
-    spu_upload_settings(0);
+/// Source start (base) address.
+pub unsafe fn set_base_address(ch: SpuChannel, addr: u32) -> Result<(), SpuError> {
+    set_addr_reg(ch, REG_SPU_S_ADDR, addr)
 }
 
-/// Get the base address.
-pub unsafe fn spu_get_base_address(ch: SpuChannel) -> u32 {
-    spu_select_channel(ch);
-    reg_read32(REG_SPU_S_ADDR)
+pub unsafe fn get_base_address(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_S_ADDR)
 }
 
-/// Get the current DMA read address.
-pub unsafe fn spu_get_current_address(_ch: SpuChannel) -> u32 {
-    reg_read32(REG_SPU_CUR_ADDR)
+/// Threshold address (threshold interrupt).
+pub unsafe fn set_threshold_address(ch: SpuChannel, addr: u32) -> Result<(), SpuError> {
+    set_addr_reg(ch, REG_SPU_M_ADDR, addr)
 }
 
-/// Set paused address for PCM16 (auto-pause point).
-pub unsafe fn spu_set_pause_address(ch: SpuChannel, addr: u32) {
-    spu_select_channel(ch);
+pub unsafe fn get_threshold_address(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_M_ADDR)
+}
+
+/// End address (end-address interrupt; PCM16 wraps back to the base).
+pub unsafe fn set_end_address(ch: SpuChannel, addr: u32) -> Result<(), SpuError> {
+    set_addr_reg(ch, REG_SPU_E_ADDR, addr)
+}
+
+pub unsafe fn get_end_address(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_E_ADDR)
+}
+
+/// Address the DMA is reading.
+pub unsafe fn get_current_address(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_CUR_ADDR)
+}
+
+/// Pause address for mono/stereo PCM16.
+pub unsafe fn set_pause_address(ch: SpuChannel, addr: u32) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
     reg_write32(REG_SPU_PA_ADDR, addr);
-    spu_upload_settings(UP_PAUSE_ADDR);
+    update_partial(UP_PAUSE_ADDR);
+    Ok(())
+}
+
+pub unsafe fn get_pause_address(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_PA_ADDR)
+}
+
+/// Tone amplitude (tone source type).
+pub unsafe fn set_tone_amp(ch: SpuChannel, amp: u32) -> Result<(), SpuError> {
+    set_addr_reg(ch, REG_SPU_TONE_AMP, amp)
+}
+
+/// Tone pulse (tone source type).
+pub unsafe fn set_tone_pulse(ch: SpuChannel, pulse: u32) -> Result<(), SpuError> {
+    set_addr_reg(ch, REG_SPU_TONE_PULSE, pulse)
 }
 
 // ============================================================================
-// Audio Parameters
+// Channel Parameters
 // ============================================================================
 
-/// Set the source data type (PCM16, MDPCM, etc.) for a channel.
-pub unsafe fn spu_set_src_type(ch: SpuChannel, src_type: SpuSrcType) {
-    spu_select_channel(ch);
-    let mut val = reg_read32(REG_SPU_CH_PAR_1);
-    val &= !SRC_TYPE;
-    val |= src_type as u32 & SRC_TYPE;
-    reg_write32(REG_SPU_CH_PAR_1, val);
-    spu_upload_settings(0);
+/// Source data format.
+pub unsafe fn set_src_type(ch: SpuChannel, src: SpuSrcType) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    reg_write32(REG_SPU_CH_PAR_1, (reg_read32(REG_SPU_CH_PAR_1) & !SRC_TYPE) | src as u32);
+    update_all();
+    Ok(())
 }
 
-/// Set channel volume (0–127).
-pub unsafe fn spu_set_channel_volume(ch: SpuChannel, volume: u8) {
-    spu_select_channel(ch);
-    let mut val = reg_read32(REG_SPU_CH_PAR_1);
-    val &= !CH_VOL;
-    val |= (volume as u32 & 0x7F) << 24;
-    reg_write32(REG_SPU_CH_PAR_1, val);
-    spu_upload_settings(UP_VOL);
+pub unsafe fn get_src_type(ch: SpuChannel) -> u32 {
+    get_reg(ch, REG_SPU_CH_PAR_1) & SRC_TYPE
 }
 
-/// Get channel volume.
-pub unsafe fn spu_get_channel_volume(ch: SpuChannel) -> u8 {
-    spu_select_channel(ch);
-    ((reg_read32(REG_SPU_CH_PAR_1) & CH_VOL) >> 24) as u8
+/// Channel volume, 0–0x7F (vendor default 0x4F for earphones, 0x3F for
+/// a speaker).
+pub unsafe fn set_channel_volume(ch: SpuChannel, volume: u8) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    reg_write32(
+        REG_SPU_CH_PAR_1,
+        (reg_read32(REG_SPU_CH_PAR_1) & 0x00FF_FFFF) | ((volume as u32) << 24),
+    );
+    update_partial(UP_VOL);
+    Ok(())
 }
 
-/// Set PAN (left/right balance). Each value is 0–31 (5-bit).
-pub unsafe fn spu_set_pan(ch: SpuChannel, left: u8, right: u8) {
-    spu_select_channel(ch);
-    let mut val = reg_read32(REG_SPU_CH_PAR_1);
-    val &= !(PAN_L | PAN_R);
-    val |= ((right as u32 & 0x1F) << 16) | ((left as u32 & 0x1F) << 8);
-    reg_write32(REG_SPU_CH_PAR_1, val);
-    spu_upload_settings(UP_PAN);
+pub unsafe fn get_channel_volume(ch: SpuChannel) -> u8 {
+    (get_reg(ch, REG_SPU_CH_PAR_1) >> 24) as u8
 }
 
-/// Set DFA (DAC frequency adjustment) value for sample rate conversion.
-pub unsafe fn spu_set_dfa(ch: SpuChannel, dfa: u16) {
-    spu_select_channel(ch);
-    let mut val = reg_read32(REG_SPU_CH_PAR_2);
-    val &= !DFA;
-    val |= dfa as u32 & DFA;
-    reg_write32(REG_SPU_CH_PAR_2, val);
-    spu_upload_settings(UP_DFA);
+/// PAN: high byte → `PAN_L` (bits 20:16), low byte → `PAN_R` (bits 12:8),
+/// 0–0x1F each (0x1F1F = centre).
+pub unsafe fn set_pan(ch: SpuChannel, pan: u16) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    let pan = ((pan as u32) << 8) & (PAN_L | PAN_R);
+    reg_write32(REG_SPU_CH_PAR_1, (reg_read32(REG_SPU_CH_PAR_1) & !(PAN_L | PAN_R)) | pan);
+    update_partial(UP_PAN);
+    Ok(())
 }
 
-/// Compute and set DFA from system clock and sample rate.
-pub unsafe fn spu_set_sample_rate(sys_clock_hz: u32, sample_rate: u32) {
-    let dfa = ((sys_clock_hz / sample_rate) >> 4) & 0x1FFF;
-    reg_write32(REG_SPU_CH_PAR_2, (reg_read32(REG_SPU_CH_PAR_2) & !DFA) | dfa);
+pub unsafe fn get_pan(ch: SpuChannel) -> u16 {
+    (get_reg(ch, REG_SPU_CH_PAR_1) >> 8) as u16
+}
+
+/// DFA (sample rate adjust): 1024 = play at the DAC rate.
+pub unsafe fn set_dfa(ch: SpuChannel, dfa: u16) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    reg_write32(REG_SPU_CH_PAR_2, dfa as u32);
+    update_partial(UP_DFA);
+    Ok(())
+}
+
+pub unsafe fn get_dfa(ch: SpuChannel) -> u16 {
+    (get_reg(ch, REG_SPU_CH_PAR_2) & DFA) as u16
+}
+
+/// Program the audio DAC clock (`REG_CLKDIV1`: UPLL ÷ (N0+1) ÷ (N1+1) =
+/// 128 × rate) for `sample_rate` from `upll_hz`, then the DFA of channels
+/// 0 and 1 to make up the rounding. The headphone volume is ramped to 0
+/// around the clock switch (pop suppression) and restored. Returns the
+/// DAC sample rate actually set.
+pub unsafe fn set_sample_rate(upll_hz: u32, sample_rate: u32) -> u32 {
+    reg_write32(REG_AHBCLK, reg_read32(REG_AHBCLK) | ADO_CKE | SPU_CKE);
+
+    let mut div = upll_hz / (128 * sample_rate);
+    let mut clk_sel = 0;
+    if div > 255 {
+        clk_sel = div / 255;
+        div /= clk_sel;
+    }
+    let mut v = reg_read32(REG_CLKDIV1);
+    v &= !ADO_S;
+    v |= (0x3 << 19) | (clk_sel << 16); // ADO_S = UPLL, ADO_N0
+    v &= !ADO_N1;
+    v |= ((div & 0xFF).wrapping_sub(1) & 0xFF) << 24;
+
+    let steps = reg_read32(REG_SPU_DAC_VOL) & 0xFF;
+    for _ in 0..steps {
+        reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL).wrapping_sub(0x0101));
+        crate::timer::timer_delay_ms(1);
+    }
+    reg_write32(REG_CLKDIV1, v);
+    for _ in 0..steps {
+        reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL).wrapping_add(0x0101));
+        crate::timer::timer_delay_ms(1);
+    }
+
+    let real = upll_hz / (128 * div.max(1) * (clk_sel + 1));
+    let dfa = (sample_rate * 1024 / real.max(1)) as u16;
+    let _ = set_dfa(0, dfa);
+    let _ = set_dfa(1, dfa);
+    real
 }
 
 // ============================================================================
-// Global Volume
+// Global Volume / Equalizer
 // ============================================================================
 
-/// Set master headphone volume. Left/right 0–31 (5-bit each, 0x00=mute, 0x1F=max).
-pub unsafe fn spu_set_volume(left: u8, right: u8) {
-    let mut val = reg_read32(REG_SPU_DAC_VOL);
-    val &= !(LHPVL | RHPVL);
-    val |= ((left as u32 & 0x1F) << 8) | (right as u32 & 0x1F);
-    reg_write32(REG_SPU_DAC_VOL, val);
+/// Headphone volume, 0 (mute) – 0x3F each side.
+pub unsafe fn set_volume(left: u8, right: u8) {
+    let vol = ((left as u32 & 0x3F) << 8) | (right as u32 & 0x3F);
+    reg_write32(REG_SPU_DAC_VOL, (reg_read32(REG_SPU_DAC_VOL) & !0x3F3F) | vol);
 }
 
-/// Get master volume. Returns (left, right) values 0–31.
-pub unsafe fn spu_get_volume() -> (u8, u8) {
-    let val = reg_read32(REG_SPU_DAC_VOL);
-    (((val & LHPVL) >> 8) as u8, (val & RHPVL) as u8)
+/// (left, right) headphone volume.
+pub unsafe fn get_volume() -> (u8, u8) {
+    let v = reg_read32(REG_SPU_DAC_VOL);
+    (((v >> 8) & 0x3F) as u8, (v & 0x3F) as u8)
+}
+
+/// Set one equalizer band's gain and enable the equalizer.
+pub unsafe fn eq_open(band: SpuEqBand, gain: SpuEqGain) {
+    let g = gain as u32;
+    let (reg, mask, shift) = match band {
+        SpuEqBand::Dc => (REG_SPU_EQGain1, GAINDC, 16),
+        SpuEqBand::Band1 => (REG_SPU_EQGain0, GAIN01, 0),
+        SpuEqBand::Band2 => (REG_SPU_EQGain0, GAIN02, 4),
+        SpuEqBand::Band3 => (REG_SPU_EQGain0, GAIN03, 8),
+        SpuEqBand::Band4 => (REG_SPU_EQGain0, GAIN04, 12),
+        SpuEqBand::Band5 => (REG_SPU_EQGain0, GAIN05, 16),
+        SpuEqBand::Band6 => (REG_SPU_EQGain0, GAIN06, 20),
+        SpuEqBand::Band7 => (REG_SPU_EQGain0, GAIN07, 24),
+        SpuEqBand::Band8 => (REG_SPU_EQGain0, GAIN08, 28),
+        SpuEqBand::Band9 => (REG_SPU_EQGain1, GAIN09, 0),
+        SpuEqBand::Band10 => (REG_SPU_EQGain1, GAIN10, 4),
+    };
+    reg_write32(reg, (reg_read32(reg) & !mask) | (g << shift));
+    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | EQU_EN | ZERO_EN);
+}
+
+/// Disable the equalizer (gains are kept).
+pub unsafe fn eq_close() {
+    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !EQU_EN & !ZERO_EN);
 }
 
 // ============================================================================
-// DAC Power Sequencing (Pop Suppression)
+// Interrupts
 // ============================================================================
 
-/// Turn on the DAC with pop-noise suppression.
+/// Enable channel events (`int::*`, several allowed). `cb` is stored for
+/// the threshold / end address events.
+pub unsafe fn enable_int(ch: SpuChannel, events: u32, cb: Option<SpuCallback>) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    // Enable bits sit 8 positions below the flag bits.
+    let en = (events & int::ALL) >> 8;
+    reg_write32(REG_SPU_CH_EVENT, reg_read32(REG_SPU_CH_EVENT) | en);
+    if events & int::TH_ADDRESS != 0 {
+        TH_CALLBACKS[ch as usize] = cb;
+    }
+    if events & int::END_ADDRESS != 0 {
+        END_CALLBACKS[ch as usize] = cb;
+    }
+    update_partial(UP_IRQ);
+    Ok(())
+}
+
+/// Disable channel events.
+pub unsafe fn disable_int(ch: SpuChannel, events: u32) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    let en = (events & int::ALL) >> 8;
+    reg_write32(REG_SPU_CH_EVENT, reg_read32(REG_SPU_CH_EVENT) & !en);
+    update_partial(UP_IRQ);
+    Ok(())
+}
+
+/// True if any of `events` is enabled on the channel.
+pub unsafe fn is_int_enabled(ch: SpuChannel, events: u32) -> bool {
+    ch < 32 && get_reg(ch, REG_SPU_CH_EVENT) & ((events & int::ALL) >> 8) != 0
+}
+
+/// Clear channel event flags (and auto-clear).
+pub unsafe fn clear_int(ch: SpuChannel, events: u32) -> Result<(), SpuError> {
+    check(ch)?;
+    select(ch);
+    for bit in [int::USER, int::SILENT, int::LOOP_START, int::END, int::END_ADDRESS, int::TH_ADDRESS] {
+        if events & bit != 0 {
+            reg_write32(REG_SPU_CH_EVENT, (reg_read32(REG_SPU_CH_EVENT) & !0x3F00) | bit);
+        }
+    }
+    reg_write32(REG_SPU_CH_EVENT, reg_read32(REG_SPU_CH_EVENT) & !AT_CLR_EN);
+    update_partial(UP_IRQ);
+    Ok(())
+}
+
+/// SPU interrupt handler (`DrvSPU_IntHandler`): acknowledges every
+/// channel's events and calls the refill callbacks — threshold → first
+/// half, end address → second half of the `open` ring buffer.
 ///
-/// `level` controls the ramp time:
-///   1 = ~0.5–1 s, 2 = ~2 s, 3 = ~3 s, 0 = mute
-pub unsafe fn spu_dac_on(level: u8) {
-    // Disable pop-control
-    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
-
-    if level == 3 {
-        reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x30);
-    } else if level == 1 {
-        reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x20);
-    } else if level == 2 {
-        reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x10);
-    } else {
-        reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x03FF_0000); // P7
-        reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
-        return;
-    }
-
-    // Power sequence: P7 → P6 → P1-4 → P5 → P0
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x0800_0000); // P7
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x0400_0000); // P6
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x01E0_0000); // P1-4
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x0200_0000); // P5
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x0001_0000); // P0
-
-    // Final delay for ramp
-    let delay_ms = match level { 3 => 220u32, 1 => 70, 2 => 30, _ => 0 };
-    crate::timer::timer_delay_ms(delay_ms);
-}
-
-/// Turn off the DAC with pop-noise suppression (reverse sequence).
-pub unsafe fn spu_dac_off(level: u8) {
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x0001_0000); // P0
-
-    let delay_ms = match level { 3 => 150u32, 1 => 70, 2 => 40, _ => 0 };
-    crate::timer::timer_delay_ms(delay_ms);
-
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x0200_0000); // P5
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x01E0_0000); // P1-4
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x0400_0000); // P6
-    crate::timer::timer_delay_ms(1);
-    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x0800_0000); // P7
-    crate::timer::timer_delay_ms(1);
-
-    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
-}
-
-// ============================================================================
-// Equalizer
-// ============================================================================
-
-/// Open the equalizer with a gain setting for a specific band.
-pub unsafe fn spu_eq_open(band: SpuEqBand, gain: SpuEqGain) {
-    let g = gain as u32 & 0xF;
-    match band {
-        SpuEqBand::Dc => {
-            reg_write32(REG_SPU_EQGain1, (reg_read32(REG_SPU_EQGain1) & !GAINDC) | (g << 16));
+/// Install with `aic_install_isr(Irq1, IRQ_SPU, isr)`.
+pub unsafe extern "C" fn isr() {
+    let pending = reg_read32(REG_SPU_CH_IRQ);
+    for ch in 0..32u32 {
+        if pending & (1 << ch) == 0 {
+            continue;
         }
-        SpuEqBand::Band1 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN01) | g);
-        }
-        SpuEqBand::Band2 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN02) | (g << 4));
-        }
-        SpuEqBand::Band3 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN03) | (g << 8));
-        }
-        SpuEqBand::Band4 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN04) | (g << 12));
-        }
-        SpuEqBand::Band5 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN05) | (g << 16));
-        }
-        SpuEqBand::Band6 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN06) | (g << 20));
-        }
-        SpuEqBand::Band7 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN07) | (g << 24));
-        }
-        SpuEqBand::Band8 => {
-            reg_write32(REG_SPU_EQGain0, (reg_read32(REG_SPU_EQGain0) & !GAIN08) | (g << 28));
-        }
-        SpuEqBand::Band9 => {
-            reg_write32(REG_SPU_EQGain1, (reg_read32(REG_SPU_EQGain1) & !GAIN09) | g);
-        }
-        SpuEqBand::Band10 => {
-            reg_write32(REG_SPU_EQGain1, (reg_read32(REG_SPU_EQGain1) & !GAIN10) | (g << 4));
-        }
-    }
-}
-
-/// Disable the equalizer.
-pub unsafe fn spu_eq_close() {
-    reg_write32(REG_SPU_EQGain0, 0);
-    reg_write32(REG_SPU_EQGain1, 0);
-}
-
-// ============================================================================
-// Interrupt Control
-// ============================================================================
-
-/// Enable an interrupt event for a channel.
-pub unsafe fn spu_enable_int(ch: SpuChannel, int_mask: u32, _callback: Option<SpuCallback>) {
-    spu_select_channel(ch);
-    let mut ev = reg_read32(REG_SPU_CH_EVENT);
-    // Map flag bits to enable bits (flag << (enable_pos - flag_pos))
-    if int_mask & TH_FG != 0 { ev |= TH_EN; }
-    if int_mask & END_FG != 0 { ev |= END_EN; }
-    if int_mask & EV_END_FG != 0 { ev |= EV_END_EN; }
-    if int_mask & EV_LP_FG != 0 { ev |= EV_LP_EN; }
-    if int_mask & EV_SLN_FG != 0 { ev |= EV_SLN_EN; }
-    if int_mask & EV_USR_FG != 0 { ev |= EV_USR_EN; }
-    reg_write32(REG_SPU_CH_EVENT, ev);
-    spu_upload_settings(UP_IRQ);
-
-    // Save callback
-    if int_mask & TH_FG != 0 { THRESHOLD_CALLBACKS[ch as usize] = _callback; }
-    if int_mask & END_FG != 0 { END_ADDR_CALLBACKS[ch as usize] = _callback; }
-}
-
-/// Disable an interrupt event for a channel.
-pub unsafe fn spu_disable_int(ch: SpuChannel, int_mask: u32) {
-    spu_select_channel(ch);
-    let mut ev = reg_read32(REG_SPU_CH_EVENT);
-    if int_mask & TH_FG != 0 { ev &= !TH_EN; THRESHOLD_CALLBACKS[ch as usize] = None; }
-    if int_mask & END_FG != 0 { ev &= !END_EN; END_ADDR_CALLBACKS[ch as usize] = None; }
-    if int_mask & EV_END_FG != 0 { ev &= !EV_END_EN; }
-    if int_mask & EV_LP_FG != 0 { ev &= !EV_LP_EN; }
-    if int_mask & EV_SLN_FG != 0 { ev &= !EV_SLN_EN; }
-    if int_mask & EV_USR_FG != 0 { ev &= !EV_USR_EN; }
-    reg_write32(REG_SPU_CH_EVENT, ev);
-    spu_upload_settings(UP_IRQ);
-}
-
-/// Clear interrupt flags for a channel.
-pub unsafe fn spu_clear_int(ch: SpuChannel, int_mask: u32) {
-    spu_select_channel(ch);
-    let ev = reg_read32(REG_SPU_CH_EVENT);
-    reg_write32(REG_SPU_CH_EVENT, ev & !(int_mask & SpuInt::ALL));
-}
-
-/// Poll interrupt flags for a channel.
-pub unsafe fn spu_poll_int(ch: SpuChannel, int_mask: u32) -> bool {
-    spu_select_channel(ch);
-    reg_read32(REG_SPU_CH_EVENT) & int_mask != 0
-}
-
-// ============================================================================
-// SPU ISR (call from interrupt handler)
-// ============================================================================
-
-/// SPU interrupt handler — dispatches per-channel callbacks.
-///
-/// Install with `aic_install_isr(Irq1, IRQ_SPU, spu_isr)`.
-pub unsafe extern "C" fn spu_isr() {
-    let mut ch_mask: u32 = 1;
-
-    for ch in 0u32..32 {
-        if reg_read32(REG_SPU_CH_IRQ) & ch_mask != 0 {
-            // Wait for channel function done
-            while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 {}
-
-            // Select channel and load settings
-            reg_write32(REG_SPU_CH_CTRL, (reg_read32(REG_SPU_CH_CTRL) & !CH_NO) | (ch << 24));
-            reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) | CH_CTRL_LOAD);
-            while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 {}
-
-            let flags = reg_read32(REG_SPU_CH_EVENT);
-            // Ack by re-writing
-            reg_write32(REG_SPU_CH_EVENT, reg_read32(REG_SPU_CH_EVENT));
-
-            // Threshold address hit → refill first half
-            if flags & TH_FG != 0 && reg_read32(REG_SPU_CH_EVENT) & TH_EN != 0 {
-                if let Some(cb) = THRESHOLD_CALLBACKS[ch as usize] {
-                    cb(core::ptr::null());
-                }
+        select(ch);
+        let flags = reg_read32(REG_SPU_CH_EVENT);
+        reg_write32(REG_SPU_CH_EVENT, reg_read32(REG_SPU_CH_EVENT));
+        let enabled = reg_read32(REG_SPU_CH_EVENT);
+        let half = PLAY_SIZE / 2;
+        if flags & END_FG != 0 && enabled & END_EN != 0 {
+            if let Some(cb) = END_CALLBACKS[ch as usize] {
+                cb((PLAY_BUF + half) as *mut u8);
             }
-            // End address hit → refill second half
-            if flags & END_FG != 0 && reg_read32(REG_SPU_CH_EVENT) & END_EN != 0 {
-                if let Some(cb) = END_ADDR_CALLBACKS[ch as usize] {
-                    cb(core::ptr::null());
-                }
-            }
-
-            // Update IRQ partial to clear in hardware
-            reg_write32(REG_SPU_CH_CTRL, reg_read32(REG_SPU_CH_CTRL) & !CH_CTRL_UPDATE_ALL_PARTIALS);
-            reg_write32(
-                REG_SPU_CH_CTRL,
-                reg_read32(REG_SPU_CH_CTRL) | UP_IRQ | CH_CTRL_UPDATE_PARTIAL,
-            );
-            while reg_read32(REG_SPU_CH_CTRL) & CH_FN != 0 {}
         }
-        ch_mask <<= 1;
+        if flags & TH_FG != 0 && enabled & TH_EN != 0 {
+            if let Some(cb) = TH_CALLBACKS[ch as usize] {
+                cb(PLAY_BUF as *mut u8);
+            }
+        }
+        update_partial(UP_IRQ);
     }
-
-    // Clear all channel IRQ flags
     reg_write32(REG_SPU_CH_IRQ, reg_read32(REG_SPU_CH_IRQ));
 }
 
 // ============================================================================
-// High-Level Convenience: Double-Buffered Playback
+// Playback (SPU.c: spuOpen / spuDacOn / spuStartPlay / spuStopPlay / ...)
 // ============================================================================
 
-/// Get a pointer to the 256-byte-aligned 32 KB playback buffer.
-pub unsafe fn spu_get_play_buffer() -> *mut u8 {
-    (&raw mut PLAY_BUFFER) as *mut u8
+/// Set up stereo PCM16 playback on channel 0 from the ring buffer `buf`
+/// (`size` bytes, 256-byte aligned, a multiple of 512): reset the engine,
+/// centre PAN, channel volume `ch_volume` (vendor: 0x4F), DAC clock for
+/// `sample_rate` from `upll_hz`, threshold at half the buffer, end at its
+/// end, and the SPU interrupt (IRQ level 1). The buffer is zeroed through
+/// its uncached alias; the callback passed to `start_play` refills it.
+pub unsafe fn open(
+    buf: *mut u8,
+    size: u32,
+    upll_hz: u32,
+    sample_rate: u32,
+    ch_volume: u8,
+) -> Result<u32, SpuError> {
+    let addr = buf as u32 | UNCACHED;
+    if addr & 0xFF != 0 || size == 0 || size % 512 != 0 {
+        return Err(SpuError::BadBuffer);
+    }
+    PLAY_BUF = addr;
+    PLAY_SIZE = size;
+    core::ptr::write_bytes(addr as *mut u8, 0, size as usize);
+
+    drv_stop_play();
+    drv_open();
+    set_pan(0, 0x1F1F)?;
+    set_channel_volume(0, ch_volume)?;
+    set_channel_volume(1, ch_volume)?;
+    channel_open(0)?;
+    let real = set_sample_rate(upll_hz, sample_rate);
+    set_src_type(0, SpuSrcType::Pcm16StereoLeft)?;
+    for ch in 0..2 {
+        set_base_address(ch, addr)?;
+        set_threshold_address(ch, addr + size / 2)?;
+        set_end_address(ch, addr + size)?;
+    }
+
+    crate::aic::aic_install_isr(crate::aic::IntLevel::Irq1, IRQ_SPU, isr);
+    crate::aic::aic_enable_interrupt(IRQ_SPU);
+    Ok(real)
 }
 
-/// Configure channel 0 for stereo PCM16 double-buffered playback.
-///
-/// Sets up base/threshold/end addresses within the play buffer,
-/// sample rate, volume, PAN, and installs the SPU ISR.
-pub unsafe fn spu_configure_playback(
-    sample_rate: SpuSampleRate,
-    volume: u8,
-    callback: SpuCallback,
-) {
-    let buf_addr = spu_get_play_buffer() as u32 | 0x8000_0000;
+/// Power the DAC up with pop suppression. `level`: 1 = ~0.5–1 s ramp,
+/// 2 = ~2 s, 3 = ~3 s; 0 = just release the power-down bits. Call before
+/// `start_play`; blocks for the ramp (~0.75 s at level 1).
+pub unsafe fn dac_on(level: u8) {
+    DAC_LEVEL = level;
+    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
+    match level {
+        3 => reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x30),
+        1 => reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x20),
+        2 => reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) & !0x10),
+        _ => {
+            reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x03FF_0000);
+            reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
+            return;
+        }
+    }
+    // Power-down bits off in order: P7, P6, P1–4, P5, then P0.
+    for mask in [0x0080_0000, 0x0040_0000, 0x001E_0000, 0x0020_0000] {
+        reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !mask);
+        crate::timer::timer_delay_ms(10);
+    }
+    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) & !0x0001_0000);
+    let wait = match level { 3 => 2200, 1 => 700, _ => 300 };
+    crate::timer::timer_delay_ms(wait);
+}
 
-    // Zero the buffer
-    core::ptr::write_bytes(spu_get_play_buffer(), 0, SPU_FRAG_SIZE);
+/// Power the DAC down (reverse of `dac_on`). Call after `stop_play`.
+pub unsafe fn dac_off() {
+    crate::timer::timer_delay_ms(10);
+    reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | 0x0001_0000); // P0
+    let wait = match DAC_LEVEL { 3 => 1500, 1 => 700, 2 => 400, _ => 0 };
+    crate::timer::timer_delay_ms(wait);
+    for bits in [0x0020_0000, 0x001E_0000, 0x0040_0000, 0x0080_0000] {
+        reg_write32(REG_SPU_DAC_VOL, reg_read32(REG_SPU_DAC_VOL) | bits);
+        crate::timer::timer_delay_ms(10);
+    }
+    reg_write32(REG_SPU_DAC_PAR, reg_read32(REG_SPU_DAC_PAR) | 0x30);
+}
 
-    spu_disable();
-    spu_open();
+/// Enable the threshold / end address interrupts with `cb` as the refill
+/// callback and start the engine. Fill the ring buffer first (it plays
+/// from its start).
+pub unsafe fn start_play(cb: SpuCallback) {
+    let _ = enable_int(0, int::TH_ADDRESS | int::END_ADDRESS, Some(cb));
+    drv_start_play();
+}
 
-    spu_set_pan(0, 0x1F, 0x1F); // center
-    spu_set_channel_volume(0, volume);
-    spu_set_channel_volume(1, volume);
+/// Disable every channel's refill interrupts and stop the engine.
+pub unsafe fn stop_play() {
+    for ch in 0..32 {
+        let _ = disable_int(ch, int::END_ADDRESS | int::TH_ADDRESS);
+    }
+    drv_stop_play();
+}
 
-    spu_channel_open(0).ok();
-
-    // Compute DFA from system clock
-    let sys_clk = crate::clock::get_clock(crate::clock::ClockNode::System) * 1000;
-    spu_set_sample_rate(sys_clk, sample_rate as u32);
-
-    // Stereo PCM16: ch0 = left, ch1 = right
-    spu_set_src_type(0, SpuSrcType::Pcm16StereoLeft);
-
-    spu_set_base_address(0, buf_addr);
-    spu_set_base_address(1, buf_addr);
-
-    spu_set_threshold_address(0, buf_addr + SPU_HALF_FRAG_SIZE as u32);
-    spu_set_threshold_address(1, buf_addr + SPU_HALF_FRAG_SIZE as u32);
-
-    spu_set_end_address(0, buf_addr + SPU_FRAG_SIZE as u32);
-    spu_set_end_address(1, buf_addr + SPU_FRAG_SIZE as u32);
-
-    // Install ISR
-    crate::aic::aic_install_isr(
-        crate::aic::IntLevel::Irq1,
-        IRQ_SPU,
-        spu_isr as unsafe extern "C" fn(),
-    );
-    crate::aic::aic_set_local_interrupt(crate::aic::LocalIntState::EnableIrq);
-    crate::aic::aic_enable_interrupt(IRQ_SPU);
-
-    // Enable threshold + end-address interrupts on ch0
-    spu_enable_int(0, TH_FG | END_FG, Some(callback));
+/// Stop the engine, mask its interrupt and turn its clocks off.
+pub unsafe fn close() {
+    crate::aic::aic_disable_interrupt(IRQ_SPU);
+    drv_close();
 }
