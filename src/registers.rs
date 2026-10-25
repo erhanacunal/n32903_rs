@@ -595,6 +595,10 @@ pub const TCSR_PRESCALE_POS: u32 = 24;
 pub const TCSR_MODE_POS: u32 = 27;
 pub const TCSR_CEN_MASK: u32 = 0x0000_0C00; // CEN + mode bits in the enable word
 pub const TCSR_PRESCALE_MASK: u32 = 0x1F00_0000;
+pub const TCSR_CEN: u32 = 0x4000_0000; // Counter Enable
+pub const TCSR_IE: u32 = 0x2000_0000; // Interrupt Enable
+pub const TCSR_MODE_PERIODIC: u32 = TIMER_PERIODIC << TCSR_MODE_POS;
+pub const TCSR_CRST: u32 = 0x0400_0000; // Counter Reset
 
 // Watchdog Timer Control (REG_WTCR) bits
 pub const WDT_WTR: u32 = 0x01;   // Write Trigger (clear counter)
