@@ -7,6 +7,7 @@
 //! - **`clock`** — System clock, PLL, and DDR SDRAM initialisation
 //! - **`uart`**   — UART0 (high-speed) and UART1 (console) with formatted output
 //! - **`gpio`**   — GPIO port A–E: direction, output, input, pull-up, interrupts
+//! - **`jpeg`**   — JPEG engine: hardware baseline decode to RGB565/RGB555/YUV422/ARGB8888
 //! - **`nand`**   — NAND flash (FMI/SM controller, DMA, BCH ECC, bad blocks)
 //! - **`sd`**     — SD card host (SIC SD engine, 4-bit, DMA): init, read, write
 //! - **`spi`**    — SPI0/SPI1 master (polled): open, clock, slave select, transfers
@@ -68,6 +69,7 @@ pub mod gpio;
 pub mod heap;
 pub mod i2c;
 pub mod ipc;
+pub mod jpeg;
 pub mod lcd;
 pub mod mmu;
 pub mod nand;

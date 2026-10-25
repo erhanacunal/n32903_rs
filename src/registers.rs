@@ -1145,6 +1145,85 @@ pub const REG_I2C_RxR: u32 = I2C_BA + 0x10; // Receive
 pub const REG_I2C_TxR: u32 = I2C_BA + 0x14; // Transmit
 
 // ============================================================================
+// JPEG Codec Registers (JPG_BA = 0xB100_A000)
+// ============================================================================
+
+pub const JPGRST: u32 = 0x0002_0000; // JPEG Reset (in REG_AHBIPRST)
+pub const JPG_CKE: u32 = 0x0000_0080; // JPEG Clock Enable (in REG_AHBCLK)
+pub const JPG_N: u32 = 0x0700_0000; // JPEG engine clock divider from HCLK3 (in REG_CLKDIV4)
+pub const IRQ_JPG: u32 = 26;
+
+// Mode Control Register
+pub const REG_JMCR: u32 = JPG_BA + 0x00;
+    pub const JMCR_RESUMEI: u32 = 0x200;  // Resume after input wait
+    pub const JMCR_RESUMEO: u32 = 0x100;  // Resume after output wait
+    pub const JMCR_ENC_DEC: u32 = 0x80;   // 1 = encode, 0 = decode
+    pub const JMCR_WIN_DEC: u32 = 0x40;   // Window decode mode
+    pub const JMCR_PRI: u32 = 0x20;       // Encode primary image
+    pub const JMCR_THB: u32 = 0x10;       // Encode thumbnail image
+    pub const JMCR_EY422: u32 = 0x08;     // Encode format YUV422 (else 420)
+    pub const JMCR_QT_BUSY: u32 = 0x04;   // Q-table busy (read-only)
+    pub const JMCR_ENG_RST: u32 = 0x02;   // Engine soft reset
+    pub const JMCR_JPG_EN: u32 = 0x01;    // Start the operation
+
+pub const REG_JHEADER: u32 = JPG_BA + 0x04; // Encode header control
+
+// Image Type Control Register
+pub const REG_JITCR: u32 = JPG_BA + 0x08;
+    pub const JITCR_ARGB8888: u32 = 0x1_0000;  // Packet output ARGB8888
+    pub const JITCR_PLANAR_ON: u32 = 0x8000;   // Planar YUV
+    pub const JITCR_ORDER: u32 = 0x4000;       // Packet data order
+    pub const JITCR_RGB555_565: u32 = 0x2000;  // Packet RGB (with ORDER): 1 = RGB565
+    pub const JITCR_DYUV_MODE: u32 = 0x0700;   // Decoded YUV format (read-only)
+    pub const JITCR_DHEND: u32 = 0x0020;       // Stop after the header is decoded
+    pub const JITCR_DTHB: u32 = 0x0010;        // Decode the thumbnail only
+    pub const JITCR_PDHTAB: u32 = 0x0001;      // Programmable Huffman table (decode)
+
+pub const REG_JPRIQC: u32 = JPG_BA + 0x10; // Primary Q-table control
+pub const REG_JTHBQC: u32 = JPG_BA + 0x14; // Thumbnail Q-table control
+pub const REG_JPRIWH: u32 = JPG_BA + 0x18; // Primary width/height
+pub const REG_JTHBWH: u32 = JPG_BA + 0x1C; // Thumbnail width/height
+pub const REG_JPRST: u32 = JPG_BA + 0x20;  // Primary restart interval
+pub const REG_JTRST: u32 = JPG_BA + 0x24;  // Thumbnail restart interval
+pub const REG_JDECWH: u32 = JPG_BA + 0x28; // Decoded width/height (read-only)
+
+// Interrupt Control and Status Register (status bits: write 1 to clear)
+pub const REG_JINTCR: u32 = JPG_BA + 0x2C;
+    pub const JINT_DHE_INTE: u32 = 0x4000;  // Header decode end
+    pub const JINT_IPW_INTE: u32 = 0x2000;  // Input wait
+    pub const JINT_DEC_INTE: u32 = 0x0400;  // Decode complete
+    pub const JINT_DER_INTE: u32 = 0x0200;  // Decode error
+    pub const JINT_DHE_INTS: u32 = 0x40;
+    pub const JINT_IPW_INTS: u32 = 0x20;
+    pub const JINT_ENC_INTS: u32 = 0x08;
+    pub const JINT_DEC_INTS: u32 = 0x04;
+    pub const JINT_DER_INTS: u32 = 0x02;
+
+pub const REG_JWINDEC0: u32 = JPG_BA + 0x44; // Window decode MCU start (Y << 16 | X)
+pub const REG_JWINDEC1: u32 = JPG_BA + 0x48; // Window decode MCU end (Y << 16 | X)
+pub const REG_JWINDEC2: u32 = JPG_BA + 0x4C; // Window decode output stride
+pub const REG_JMACR: u32 = JPG_BA + 0x50;    // Memory address mode control
+pub const REG_JPSCALU: u32 = JPG_BA + 0x54;  // Primary up-scaling (encode)
+
+// Primary Scaling-Down Control Register
+pub const REG_JPSCALD: u32 = JPG_BA + 0x58;
+    pub const JPSCALD_PSX_ON: u32 = 0x8000;     // Down-scaling enable
+    pub const JPSCALD_PS_LPF_ON: u32 = 0x4000;  // Down-scaling low-pass filter
+    pub const JPSCALD_PSCALX_F: u32 = 0x1F00;   // Horizontal factor (planar)
+    pub const JPSCALD_PSCALY_F: u32 = 0x003F;   // Vertical factor (planar)
+
+pub const REG_JTSCALD: u32 = JPG_BA + 0x5C;  // Thumbnail scaling-down
+pub const REG_JYADDR0: u32 = JPG_BA + 0x7C;  // Y / packet output address
+pub const REG_JUADDR0: u32 = JPG_BA + 0x80;  // U output address (planar)
+pub const REG_JVADDR0: u32 = JPG_BA + 0x84;  // V output address (planar)
+pub const REG_JYSTRIDE: u32 = JPG_BA + 0x94; // Y / packet output stride (extra pixels per row)
+pub const REG_JUSTRIDE: u32 = JPG_BA + 0x98;
+pub const REG_JVSTRIDE: u32 = JPG_BA + 0x9C;
+pub const REG_JIOADDR0: u32 = JPG_BA + 0xA0; // Bit-stream address
+pub const REG_JUPRAT: u32 = JPG_BA + 0xB0;   // Scaling ratio (packet down-scale / encode up-scale)
+pub const REG_JSRCH: u32 = JPG_BA + 0xB8;    // Encode source image height
+
+// ============================================================================
 // MMIO Helper Functions
 // ============================================================================
 
